@@ -13,7 +13,14 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        const firebaseConfig = {
+  apiKey: "AIzaSyBSFW2p2pjc0AAC-wm3UwxwHI_-VdBKW04",
+  authDomain: "sista-kipp.firebaseapp.com",
+  projectId: "sista-kipp",
+  storageBucket: "sista-kipp.firebasestorage.app",
+  messagingSenderId: "102845988658",
+  appId: "1:102845988658:web:c48bc4e94e70c3dd7ea12b",
+  measurementId: "G-X71L4F0VJF"
 
         // Globala variabler
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
