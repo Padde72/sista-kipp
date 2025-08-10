@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lagerhantering</title>
+    <!-- Tailwind CSS för en responsiv och modern design -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Barcode & QR Code Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <!-- Firebase SDK för databas och autentisering -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Globala variabler
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initiera Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Lokalt lösenord
+            const LOCAL_PASSWORD = "PostNord123";
+
+            // Inloggningselement
+            const loginScreen = document.getElementById('loginScreen');
+            const mainApp = document.getElementById('mainApp');
+            const nameLoginInput = document.getElementById('nameLoginInput');
+            const passwordLoginInput = document.getElementById('passwordLoginInput');
+            const loginButton = document.getElementById('loginButton');
+            const loginError = document.getElementById('loginError');
+            const loggedInUser = document.getElementById('loggedInUser');
+
+            // Hämta HTML-element
+            const addButton = document.getElementById('addButton');
+            const saveButton = document.getElementById('saveButton');
+            const cancelButton = document.getElementById('cancelButton');
+            const printNewProductBarcodeButton = document.getElementById('printNewProductBarcodeButton');
+            const logNewButton = document.getElementById('logNewButton');
+            const deregisterProductButton = document.getElementById('deregisterProductButton');
+
+            const inventoryList = document.getElementById('inventoryList');
+            const searchInput = document.getElementById('searchInput');
+            const showDiscardedCheckbox = document.getElementById('showDiscardedCheckbox');
+            const showSoldCheckbox = document.getElementById('showSoldCheckbox');
+            const showToBeDiscardedCheckbox = document.getElementById('showToBeDiscardedCheckbox');
+            const messageBox = document.getElementById('messageBox');
+            const statusMessage = document.getElementById('statusMessage');
+            
+            // Formulärfält
+            const formInputs = document.getElementById('formInputs');
+            const nameInput = document.getElementById('nameInput');
+            const dispositionInput = document.getElementById('dispositionInput');
+            const warehouseInput = document.getElementById('warehouseInput');
+            const shelfInput = document.getElementById('shelfInput');
+            const descInput = document.getElementById('descInput');
+            const weightInput = document.getElementById('weightInput');
+            const voiceInputButton = document.getElementById('voiceInputButton');
+            
+            // Bildhanteringselement
+            const imageDropZone = document.getElementById('imageDropZone');
+            const imageFileInput = document.getElementById('imageFileInput');
+            const imagePlaceholder = document.getElementById('imagePlaceholder');
+            const imageThumbnailContainer = document.getElementById('imageThumbnailContainer');
+            const openCameraButton = document.getElementById('openCameraButton');
+
+            const barcodeModal = document.getElementById('barcodeModal');
+            const barcodeCanvas = document.getElementById('barcodeCanvas');
+            const barcodeProductInfo = document.getElementById('barcodeProductInfo');
+            const barcodePrintButton = document.getElementById('barcodePrintButton');
+            const barcodeCloseButton = document.getElementById('barcodeCloseButton');
+
+            // Scanner Modal element
+            const scannerModal = document.getElementById('scannerModal');
+            const qrReaderElement = document.getElementById('qr-reader');
+            const scannerInstructions = document.getElementById('scanner-instructions');
+            const closeScannerButton = document.getElementById('closeScannerButton');
+            
+            // Product Detail Modal
+            const detailModal = document.getElementById('detailModal');
+            const detailMainImage = document.getElementById('detailMainImage');
+            const detailThumbnailContainer = document.getElementById('detailThumbnailContainer');
+            const detailInfo = document.getElementById('detailInfo');
+            const closeDetailModalButton = document.getElementById('closeDetailModalButton');
+
+            // Rapportsektion
+            const reportDateFrom = document.getElementById('reportDateFrom');
+            const reportDateTo = document.getElementById('reportDateTo');
+            const reportWarehouseFilter = document.getElementById('reportWarehouseFilter');
+            const generateReportButton = document.getElementById('generateReportButton');
+            const printReportButton = document.getElementById('printReportButton');
+            const printSalesButton = document.getElementById('printSalesButton');
+            const reportList = document.getElementById('reportList');
+            const deregisterAllButton = document.getElementById('deregisterAllButton');
+
+            // Bekräftelsemodal
+            const confirmationModal = document.getElementById('confirmationModal');
+            const confirmationText = document.getElementById('confirmationText');
+            const confirmButton = document.getElementById('confirmButton');
+            const cancelConfirmButton = document.getElementById('cancelConfirmButton');
+
+            // State-variabler
+            let inventory = [];
+            let editingDocId = null;
+            let lastSavedDocId = null;
+            let currentUserName = '';
+            let unsubscribeFromInventory = null;
+            let isAuthReady = false;
+            let newProductData = { images: [] };
+            let html5QrCode;
+            let scannedProductId = null;
+            let recognition;
+            const MAX_IMAGES = 5;
+            let itemsToDeregister = [];
+            
+            // --- HJÄLPFUNKTIONER ---
+            function performLogin(name) {
+                currentUserName = name;
+                loginScreen.classList.add('hidden');
+                mainApp.classList.remove('hidden');
+                loggedInUser.textContent = `Inloggad som: ${currentUserName}`;
+                loginError.classList.add('hidden');
+            }
+
+            // --- INLOGGNINGSLOGIK ---
+            loginButton.addEventListener('click', () => {
+                const name = nameLoginInput.value.trim();
+                const password = passwordLoginInput.value;
+                if (name && password === LOCAL_PASSWORD) {
+                    // Spara uppgifter i webbläsarens lokala lagring
+                    localStorage.setItem('kipp-username', name);
+                    localStorage.setItem('kipp-password', password);
+                    performLogin(name);
+                } else {
+                    loginError.textContent = "Felaktigt namn eller lösenord.";
+                    loginError.classList.remove('hidden');
+                    if (!name) {
+                        nameLoginInput.focus();
+                    } else {
+                        passwordLoginInput.focus();
+                    }
+                }
+            });
+            
+            // Kontrollera om det finns sparade inloggningsuppgifter när sidan laddas
+            const savedName = localStorage.getItem('kipp-username');
+            const savedPassword = localStorage.getItem('kipp-password');
+            if (savedName && savedPassword === LOCAL_PASSWORD) {
+                performLogin(savedName);
+            }
+
+
+            // --- RÖSTINMATNING ---
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (SpeechRecognition) {
+                recognition = new SpeechRecognition();
+                recognition.lang = 'sv-SE';
+                recognition.continuous = false;
+                recognition.interimResults = false;
+
+                voiceInputButton.classList.remove('hidden');
+
+                let isListening = false;
+                recognition.onstart = () => { isListening = true; voiceInputButton.innerHTML = '<span class="text-red-500 animate-pulse">🔴</span>'; };
+                recognition.onend = () => { isListening = false; voiceInputButton.innerHTML = '<span>🎤</span>'; };
+                recognition.onerror = (event) => { showMessage(`Röstigenkänningsfel: ${event.error}`, 'error'); };
+                recognition.onresult = (event) => {
+                    const transcript = event.results[0][0].transcript;
+                    descInput.value += (descInput.value ? ' ' : '') + transcript;
+                };
+
+                voiceInputButton.addEventListener('click', () => {
+                    if (isListening) { recognition.stop(); } 
+                    else { try { recognition.start(); } catch (e) { showMessage('Kunde inte starta röstigenkänning.', 'error'); } }
+                });
+            } else {
+                voiceInputButton.classList.add('hidden');
+                descInput.placeholder = "Beskrivning";
+            }
+
+            
+            function showMessage(message, type = 'success') {
+                const msgBox = document.getElementById('messageBox');
+                msgBox.textContent = message;
+                msgBox.className = `mt-4 p-3 text-sm rounded-xl block text-center ${type === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`;
+                setTimeout(() => { msgBox.classList.add('hidden'); }, 3000);
+            }
+            
+            // --- BILDHANTERING, KOMPRIMERING & AI ---
+            function renderThumbnails() {
+                imageThumbnailContainer.innerHTML = '';
+                newProductData.images.forEach((imageSrc, index) => {
+                    const thumbWrapper = document.createElement('div');
+                    thumbWrapper.className = 'relative';
+                    const img = document.createElement('img');
+                    img.src = imageSrc;
+                    img.className = 'w-20 h-20 object-cover rounded-md';
+                    const removeBtn = document.createElement('button');
+                    removeBtn.type = 'button';
+                    removeBtn.className = 'absolute -top-1 -right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold hover:bg-red-700';
+                    removeBtn.innerHTML = '&times;';
+                    removeBtn.onclick = () => removeImage(index);
+                    thumbWrapper.appendChild(img);
+                    thumbWrapper.appendChild(removeBtn);
+                    imageThumbnailContainer.appendChild(thumbWrapper);
+                });
+                
+                imageDropZone.classList.toggle('hidden', newProductData.images.length >= MAX_IMAGES);
+                openCameraButton.classList.toggle('hidden', newProductData.images.length >= MAX_IMAGES);
+            }
+            
+            function removeImage(index) {
+                newProductData.images.splice(index, 1);
+                renderThumbnails();
+            }
+
+            async function handleFiles(files) {
+                const filesToProcess = Array.from(files).filter(file => file.type.startsWith('image/'));
+                if (filesToProcess.length === 0) return;
+                if (newProductData.images.length + filesToProcess.length > MAX_IMAGES) {
+                    showMessage(`Du kan max ladda upp ${MAX_IMAGES} bilder.`, 'error');
+                    return;
+                }
+
+                for (const file of filesToProcess) {
+                    try {
+                        const compressedImage = await compressImage(file);
+                        newProductData.images.push(compressedImage);
+                        
+                        if (newProductData.images.length === 1) {
+                            const analysisResult = await analyzeImageWithAI(compressedImage);
+                            if (analysisResult) {
+                                if (analysisResult.trackingNumber) {
+                                    nameInput.value = "kollinummer finns " + analysisResult.trackingNumber;
+                                    showMessage(`Kollinummer ${analysisResult.trackingNumber} hittades.`, 'success');
+                                }
+                                if (analysisResult.description) {
+                                    descInput.value = (descInput.value ? descInput.value + "\n" : "") + analysisResult.description;
+                                    if (!analysisResult.trackingNumber) {
+                                        showMessage('Beskrivning från bild lades till.', 'success');
+                                    }
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        console.error("Fel vid bildbehandling:", error);
+                        showMessage("Kunde inte behandla en av bilderna.", "error");
+                    }
+                }
+                renderThumbnails();
+            }
+
+            async function compressImage(file, quality = 0.7, maxWidth = 1024, maxHeight = 1024) {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.readAsDataURL(file);
+                    reader.onload = (event) => {
+                        const img = new Image();
+                        img.src = event.target.result;
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const ctx = canvas.getContext('2d');
+                            let width = img.width;
+                            let height = img.height;
+                            if (width > height) {
+                                if (width > maxWidth) { height *= maxWidth / width; width = maxWidth; }
+                            } else {
+                                if (height > maxHeight) { width *= maxHeight / height; height = maxHeight; }
+                            }
+                            canvas.width = width;
+                            canvas.height = height;
+                            ctx.drawImage(img, 0, 0, width, height);
+                            resolve(canvas.toDataURL('image/jpeg', quality));
+                        };
+                        img.onerror = error => reject(error);
+                    };
+                    reader.onerror = error => reject(error);
+                });
+            }
+
+            async function analyzeImageWithAI(base64ImageData) {
+                const apiKey = "";
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+                
+                const schema = {
+                    type: "OBJECT",
+                    properties: {
+                        "description": { "type": "STRING", "description": "En kort beskrivning av objektet på max 5 ord." },
+                        "trackingNumber": { "type": "STRING", "description": "Ett eventuellt kollinummer som hittats, annars en tom sträng." }
+                    },
+                    required: ["description", "trackingNumber"]
+                };
+
+                const payload = {
+                    contents: [{
+                        parts: [
+                            { text: "Analysera bilden. Ge en kort beskrivning (max 5 ord) av huvudobjektet. Extrahera också eventuella kollinummer som antingen slutar på 'SE' eller börjar med '(00)'." },
+                            { inlineData: { mimeType: "image/jpeg", data: base64ImageData.split(',')[1] } }
+                        ]
+                    }],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: schema
+                    }
+                };
+
+                try {
+                    const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    if (!response.ok) throw new Error(`API-fel: ${response.statusText}`);
+                    const result = await response.json();
+                    const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (jsonText) {
+                        return JSON.parse(jsonText);
+                    }
+                    return null;
+                } catch (error) {
+                    console.error("Fel vid bildanalys:", error);
+                    showMessage("Kunde inte analysera bilden.", "error");
+                    return null;
+                }
+            }
+
+            // --- STRECKKOD & DETALJVY ---
+            window.showBarcode = (docId, autoPrint = false) => {
+                const product = inventory.find(p => p.id === docId);
+                if (!product) return;
+                try {
+                    JsBarcode(barcodeCanvas, docId, { format: "CODE128", displayValue: false, margin: 10 });
+                    barcodeProductInfo.innerHTML = `<p class="font-bold text-lg">${product.name}</p><p class="text-gray-600">Hylla: ${product.shelfLocation || 'N/A'}</p><p class="text-xs text-gray-500 mt-2 break-all">ID: ${docId}</p>`;
+                    barcodeModal.classList.remove('hidden');
+                    if (autoPrint) { setTimeout(() => barcodePrintButton.click(), 100); }
+                } catch (e) { console.error(e); showMessage('Kunde inte skapa streckkod.', 'error'); }
+            };
+
+            barcodePrintButton.addEventListener('click', () => {
+                const barcodeImage = barcodeCanvas.toDataURL("image/png");
+                const productInfoHTML = barcodeProductInfo.innerHTML;
+                const printWindow = window.open('', '', 'height=400,width=400');
+                printWindow.document.write(`<html><head><title>Skriv ut Etikett</title><style>body{text-align:center;font-family:sans-serif; margin-top: 20px;} img{height:80px;} p{margin: 5px 0;} .break-all{word-break:break-all;}</style></head><body><img src="${barcodeImage}">${productInfoHTML}</body></html>`);
+                printWindow.document.close();
+                printWindow.focus();
+                setTimeout(() => { printWindow.print(); printWindow.close(); }, 250);
+            });
+
+            barcodeCloseButton.addEventListener('click', () => barcodeModal.classList.add('hidden'));
+
+            window.showProductDetails = (docId) => {
+                const product = inventory.find(p => p.id === docId);
+                if (!product) return;
+                detailMainImage.src = (product.images && product.images.length > 0) ? product.images[0] : 'https://placehold.co/600x400/eee/ccc?text=Ingen+bild';
+                detailThumbnailContainer.innerHTML = '';
+                if (product.images && product.images.length > 1) {
+                    product.images.forEach(imgSrc => {
+                        const thumb = document.createElement('img');
+                        thumb.src = imgSrc;
+                        thumb.className = 'w-16 h-16 object-cover rounded-md cursor-pointer hover:ring-2 ring-blue-500';
+                        thumb.onclick = () => { detailMainImage.src = imgSrc; };
+                        detailThumbnailContainer.appendChild(thumb);
+                    });
+                }
+                detailInfo.innerHTML = `
+                    <h3 class="text-2xl font-bold mb-2">${product.name}</h3>
+                    <p class="text-gray-500 font-mono mb-4">ID: ${product.id}</p>
+                    <div class="space-y-2 text-left">
+                        <p><strong>Lager:</strong> ${product.warehouse || 'Ej angivet'}</p>
+                        <p><strong>Hyllplats:</strong> ${product.shelfLocation || 'Ej angivet'}</p>
+                        <p><strong>Vikt:</strong> ${product.weight || 'Ej angivet'}</p>
+                        <p><strong>Beskrivning:</strong> <span class="italic">${product.description || 'Ingen'}</span></p>
+                        <p><strong>Anmärkning (Sälj/Kassera):</strong> ${product.dispositionNote || 'Ingen'}</p>
+                        <p><strong>Loggad av:</strong> ${product.userName || 'Okänd'}</p>
+                    </div>`;
+                detailModal.classList.remove('hidden');
+            };
+            
+            closeDetailModalButton.addEventListener('click', () => detailModal.classList.add('hidden'));
+
+            // --- STRECKKODSSKANNER ---
+            const onScanSuccess = async (decodedText) => { await linkProductToShelf(scannedProductId, decodedText); stopScanner(); };
+            const onScanFailure = (error) => {};
+
+            async function linkProductToShelf(productId, shelfLocation) {
+                if (!productId) { showMessage('Inget produkt-ID att koppla.', 'error'); return; }
+                statusMessage.textContent = 'Kopplar till hylla...';
+                try {
+                    const itemRef = doc(db, `/artifacts/${appId}/public/data/inventory`, productId);
+                    await updateDoc(itemRef, { shelfLocation: shelfLocation });
+                    showMessage(`Produkt kopplad till hylla ${shelfLocation}!`);
+                } catch (error) { console.error("Fel vid koppling till hylla: ", error); showMessage('Kunde inte koppla produkt till hylla.', 'error'); } 
+                finally { statusMessage.textContent = 'Ansluten.'; }
+            }
+            
+            window.initiateShelfScan = (productId) => {
+                const product = inventory.find(p => p.id === productId);
+                if (!product) { showMessage('Produkten hittades inte.', 'error'); return; }
+                scannedProductId = productId;
+                startScanner(product.name);
+            };
+
+            async function startScanner(productName) {
+                scannerModal.classList.remove('hidden');
+                scannerInstructions.textContent = "Väntar på kameratillstånd...";
+                scannerInstructions.className = 'p-2 rounded-lg text-center font-semibold bg-yellow-200 text-yellow-800 animate-pulse';
+                if (!html5QrCode) { html5QrCode = new Html5Qrcode("qr-reader"); }
+                const config = { fps: 10, qrbox: { width: 250, height: 150 }, supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA] };
+                try {
+                    await html5QrCode.start({ facingMode: "environment" }, config, onScanSuccess, onScanFailure);
+                    scannerInstructions.textContent = `Skanna streckkod för hyllplats till: ${productName}`;
+                    scannerInstructions.className = 'p-2 rounded-lg text-center font-semibold bg-blue-200 text-blue-800';
+                    scannerInstructions.classList.remove('animate-pulse');
+                } catch (err) {
+                    console.error("Kunde inte starta skannern", err);
+                    scannerInstructions.textContent = "Kameran kunde inte startas. Kontrollera behörigheter.";
+                    scannerInstructions.className = 'p-2 rounded-lg text-center font-semibold bg-red-200 text-red-800';
+                    setTimeout(() => { if (!scannerModal.classList.contains('hidden')) { stopScanner(); } }, 3000);
+                }
+            }
+
+            function stopScanner() {
+                if (html5QrCode && html5QrCode.isScanning) {
+                    html5QrCode.stop().then(() => scannerModal.classList.add('hidden')).catch(err => { console.error("Fel vid stopp av skanner", err); scannerModal.classList.add('hidden'); });
+                } else { scannerModal.classList.add('hidden'); }
+            }
+            
+            closeScannerButton.addEventListener('click', stopScanner);
+
+            // --- INVENTORY LOGIC ---
+            window.sendProductEmail = (docId) => {
+                const product = inventory.find(p => p.id === docId);
+                if (!product) {
+                    showMessage('Produkten kunde inte hittas.', 'error');
+                    return;
+                }
+
+                const recipient = 'overtaligt-epp.jonkoping@postnord.com';
+                const subject = `Fråga om produkt: ${product.name} (ID: ${product.id})`;
+                const body = `
+Hej,
+
+Jag har en fråga gällande följande produkt:
+
+-----------------------------------
+Produktnamn: ${product.name || 'Ej angivet'}
+ID: ${product.id}
+Lager: ${product.warehouse || 'Ej angivet'}
+Hyllplats: ${product.shelfLocation || 'Ej angivet'}
+Vikt: ${product.weight || 'Ej angivet'}
+Beskrivning: ${product.description || 'Ingen'}
+Anmärkning (Sälj/Kassera): ${product.dispositionNote || 'Ingen'}
+-----------------------------------
+
+[Skriv din fråga här]
+
+Med vänlig hälsning,
+${currentUserName}
+                `.trim().replace(/\n/g, '%0D%0A');
+
+                const mailtoLink = `mailto:${recipient}?subject=${encodeURIComponent(subject)}&body=${body}`;
+                window.open(mailtoLink, '_blank');
+            };
+
+            function renderInventory(itemsToRender) {
+                inventoryList.innerHTML = '';
+                if (itemsToRender.length === 0) { inventoryList.innerHTML = `<li class="p-4 text-center text-gray-300">${searchInput.value ? 'Inget hittades.' : 'Lagret är tomt.'}</li>`; return; }
+                itemsToRender.forEach(product => {
+                    const listItem = document.createElement('li');
+                    let baseClasses = 'flex flex-col sm:flex-row items-start sm:items-center justify-between p-3 text-white gap-3';
+                    if (product.kasserad) listItem.className = `${baseClasses} bg-red-800/50`;
+                    else if (product.såld) listItem.className = `${baseClasses} bg-green-800/50`;
+                    else listItem.className = baseClasses;
+                    const productInfo = document.createElement('div');
+                    productInfo.className = 'flex-1 flex items-center space-x-4';
+                    if (product.images && product.images.length > 0) {
+                        const imgWrapper = document.createElement('div');
+                        imgWrapper.className = 'relative flex-shrink-0';
+                        const img = document.createElement('img');
+                        img.src = product.images[0];
+                        img.alt = `Bild av ${product.name}`;
+                        img.className = `w-16 h-16 object-cover rounded-xl shadow-md cursor-pointer hover:scale-105 transition-transform ${product.kasserad || product.såld ? 'filter grayscale' : ''}`;
+                        img.onclick = () => window.showProductDetails(product.id);
+                        imgWrapper.appendChild(img);
+                        if (product.images.length > 1) {
+                            const badge = document.createElement('span');
+                            badge.className = 'absolute -top-1 -right-1 bg-sky-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center';
+                            badge.textContent = `+${product.images.length - 1}`;
+                            imgWrapper.appendChild(badge);
+                        }
+                        productInfo.appendChild(imgWrapper);
+                    }
+                    const textContainer = document.createElement('div');
+                    textContainer.className = 'flex-1';
+                    const nameClass = product.kasserad || product.såld ? 'line-through' : '';
+                    let mainInfoHTML = `<span class="font-bold text-base ${nameClass}">${product.name}</span>`;
+                    if (product.kasserad) mainInfoHTML += `<span class="ml-2 bg-red-500 text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">Lämnat lagret</span>`;
+                    else if (product.såld) mainInfoHTML += `<span class="ml-2 bg-green-500 text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">SÅLD</span>`;
+                    
+                    let locationHTML = `<div class="flex flex-wrap items-center gap-x-4 text-sm mt-1">`;
+                    if (product.shelfLocation) {
+                        locationHTML += `<div class="font-bold text-sky-300 flex items-center gap-1"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10v11H4V10M2 10h20M7 15h1m4 0h1M7 15h1m4 0h1M4 21V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v17"/></svg>Hylla: <span class="font-mono">${product.shelfLocation}</span></div>`;
+                    }
+                    locationHTML += `<div class="font-bold text-gray-400">ID: <span class="font-mono">${product.id}</span></div></div>`;
+
+                    let detailsHTML = `<div class="flex flex-wrap items-center gap-x-3 text-xs text-gray-300 mt-1">`;
+                    if (product.warehouse) detailsHTML += `<span class="${nameClass}">Lager: ${product.warehouse}</span>`;
+                    detailsHTML += `</div>`;
+
+                    let descriptionHTML = `
+                        ${product.dispositionNote ? `<p class="text-sm text-yellow-300 mt-1">Anm: ${product.dispositionNote}</p>` : ''}
+                        ${product.description ? `<p class="italic text-sm mt-1 ${nameClass}">${product.description}</p>` : ''}
+                        ${product.weight ? `<p class="italic text-sm mt-1 ${nameClass}">Vikt: ${product.weight}</p>` : ''}
+                        <p class="text-xs text-gray-400 mt-2">Loggad ${product.date} av ${product.userName || 'Okänd'}</p>`;
+                    
+                    textContainer.innerHTML = `<div class="flex flex-wrap items-baseline">${mainInfoHTML}</div>${locationHTML}${detailsHTML}<div class="text-sm text-gray-200 mt-1">${descriptionHTML}</div>`;
+                    productInfo.appendChild(textContainer);
+                    
+                    const controls = document.createElement('div');
+                    controls.className = 'flex items-center gap-2 flex-shrink-0 self-end sm:self-center';
+                    if (isAuthReady) {
+                        if (product.kasserad) { controls.innerHTML = `<button title="Återställ" class="p-2 rounded-full bg-green-500/20 hover:bg-green-500/40" onclick="window.toggleKasseraStatus('${product.id}', true)"><svg class="w-5 h-5 text-green-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H7a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg></button>`; } 
+                        else if (product.såld) { controls.innerHTML = `<button title="Återställ" class="p-2 rounded-full bg-yellow-500/20 hover:bg-yellow-500/40" onclick="window.toggleSåldStatus('${product.id}', true)"><svg class="w-5 h-5 text-yellow-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H7a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg></button>`; } 
+                        else { controls.innerHTML = `<button title="Koppla till hylla" class="p-2 rounded-full bg-indigo-500/20 hover:bg-indigo-500/40" onclick="window.initiateShelfScan('${product.id}')"><svg class="w-5 h-5 text-indigo-300" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg></button><button title="Visa streckkod" class="p-2 rounded-full bg-sky-500/20 hover:bg-sky-500/40" onclick="window.showBarcode('${product.id}')"><svg class="w-5 h-5 text-sky-300" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M3 4h2v16H3V4zm3 0h1v16H6V4zm2 0h1v16H8V4zm2 0h2v16h-2V4zm3 0h1v16h-1V4zm2 0h1v16h-1V4zm2 0h2v16h-2V4z"/></svg></button><button title="Ändra" class="p-2 rounded-full bg-gray-500/20 hover:bg-gray-500/40" onclick="window.editItem('${product.id}')"><svg class="w-5 h-5 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z"></path></svg></button><button title="Sälj" class="p-2 rounded-full bg-green-500/20 hover:bg-green-500/40" onclick="window.toggleSåldStatus('${product.id}', false)"><svg class="w-5 h-5 text-green-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg></button><button title="Kassera" class="p-2 rounded-full bg-yellow-500/20 hover:bg-yellow-500/40" onclick="window.toggleKasseraStatus('${product.id}', false)"><svg class="w-5 h-5 text-yellow-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>`; }
+                        controls.innerHTML += `<button title="Maila om produkt" class="p-2 rounded-full bg-teal-500/20 hover:bg-teal-500/40" onclick="window.sendProductEmail('${product.id}')"><svg class="w-5 h-5 text-teal-300" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg></button>`;
+                    }
+                    listItem.appendChild(productInfo);
+                    listItem.appendChild(controls);
+                    inventoryList.appendChild(listItem);
+                });
+            }
+
+            function setPostSaveState() {
+                const actionButtonsContainer = document.getElementById('actionButtonsContainer');
+                const successStateContainer = document.getElementById('successStateContainer');
+                const successProductName = document.getElementById('successProductName');
+                actionButtonsContainer.classList.add('hidden');
+                successStateContainer.classList.remove('hidden');
+                const savedProduct = getFormData();
+                successProductName.textContent = `"${savedProduct.name}" har lagts till i lagret.`;
+                formInputs.classList.add('opacity-50');
+                formInputs.style.pointerEvents = 'none';
+            }
+            
+            function getFormData() {
+                return {
+                    name: nameInput.value.trim(),
+                    dispositionNote: dispositionInput.value,
+                    warehouse: warehouseInput.value,
+                    shelfLocation: shelfInput.value.trim(),
+                    description: descInput.value.trim(),
+                    weight: weightInput.value.trim(),
+                    images: newProductData.images,
+                };
+            }
+
+            async function addProduct() {
+                const dataToSave = getFormData();
+                if (!dataToSave.name || !dataToSave.warehouse) { 
+                    showMessage('Produktnamn och lager måste anges.', 'error'); 
+                    return; 
+                }
+                if (!dataToSave.dispositionNote) {
+                    showMessage('Anmärkning (Sälj/Kassera) måste väljas.', 'error');
+                    return;
+                }
+                statusMessage.textContent = 'Lägger till produkt...';
+                try {
+                    const newId = Math.floor(100000 + Math.random() * 900000).toString();
+                    const docRef = doc(db, `/artifacts/${appId}/public/data/inventory`, newId);
+                    await setDoc(docRef, { ...dataToSave, date: new Date().toLocaleDateString('sv-SE'), userName: currentUserName, kasserad: false, såld: false });
+                    lastSavedDocId = newId;
+                    showMessage('Produkt tillagd!');
+                    setPostSaveState();
+                } catch (error) { console.error("Fel vid tillägg: ", error); showMessage('Ett fel uppstod.', 'error'); } 
+                finally { statusMessage.textContent = 'Ansluten.'; }
+            }
+            
+            window.editItem = (docId) => {
+                const item = inventory.find(i => i.id === docId);
+                if (!item) return;
+                editingDocId = docId;
+                const actionButtonsContainer = document.getElementById('actionButtonsContainer');
+                const successStateContainer = document.getElementById('successStateContainer');
+                successStateContainer.classList.add('hidden');
+                actionButtonsContainer.classList.remove('hidden');
+                addButton.classList.add('hidden');
+                saveButton.classList.remove('hidden');
+                cancelButton.classList.remove('hidden');
+                deregisterProductButton.classList.remove('hidden');
+                nameInput.value = item.name || '';
+                dispositionInput.value = item.dispositionNote || '';
+                warehouseInput.value = item.warehouse || '';
+                shelfInput.value = item.shelfLocation || '';
+                descInput.value = item.description || '';
+                weightInput.value = item.weight || '';
+                newProductData.images = item.images || [];
+                renderThumbnails();
+                formInputs.classList.remove('opacity-50');
+                formInputs.style.pointerEvents = 'auto';
+                window.scrollTo(0, 0);
+            }
+
+            async function saveEdit() {
+                if (!editingDocId) return;
+                const dataToSave = getFormData();
+                if (!dataToSave.name || !dataToSave.warehouse) { 
+                    showMessage('Produktnamn och lager måste anges.', 'error'); 
+                    return; 
+                }
+                 if (!dataToSave.dispositionNote) {
+                    showMessage('Anmärkning (Sälj/Kassera) måste väljas.', 'error');
+                    return;
+                }
+                statusMessage.textContent = 'Sparar ändringar...';
+                try {
+                    const itemRef = doc(db, `/artifacts/${appId}/public/data/inventory`, editingDocId);
+                    const existingItem = inventory.find(i => i.id === editingDocId);
+                    await setDoc(itemRef, { ...existingItem, ...dataToSave, userName: currentUserName });
+                    lastSavedDocId = editingDocId;
+                    showMessage('Produkt uppdaterad!');
+                    setPostSaveState();
+                } catch (error) { console.error("Fel vid uppdatering: ", error); showMessage('Ett fel uppstod.', 'error'); } 
+                finally { statusMessage.textContent = 'Ansluten.'; }
+            }
+
+            async function updateProductStatus(docId, field, value) {
+                statusMessage.textContent = 'Uppdaterar status...';
+                try {
+                    await updateDoc(doc(db, `/artifacts/${appId}/public/data/inventory`, docId), { [field]: !value });
+                    showMessage('Status uppdaterad!');
+                } catch (error) { console.error("Fel vid statusuppdatering: ", error); showMessage('Ett fel uppstod.', 'error'); } 
+                finally { statusMessage.textContent = 'Ansluten.'; }
+            }
+            window.toggleKasseraStatus = (id, val) => updateProductStatus(id, 'kasserad', val);
+            window.toggleSåldStatus = (id, val) => updateProductStatus(id, 'såld', val);
+
+            window.deleteItem = async (docId) => {
+                statusMessage.textContent = 'Tar bort produkt...';
+                try {
+                    await deleteDoc(doc(db, `/artifacts/${appId}/public/data/inventory`, docId));
+                    showMessage('Produkt borttagen!');
+                } catch (error) { console.error("Fel vid borttagning: ", error); showMessage('Ett fel uppstod.', 'error'); } 
+                finally { statusMessage.textContent = 'Ansluten.'; }
+            }
+            
+            function clearForm() {
+                nameInput.value = '';
+                dispositionInput.value = '';
+                warehouseInput.value = '';
+                shelfInput.value = '';
+                descInput.value = '';
+                weightInput.value = '';
+                newProductData.images = [];
+                renderThumbnails();
+                lastSavedDocId = null;
+                editingDocId = null;
+            }
+
+            function resetFormAndRender() {
+                clearForm();
+                const actionButtonsContainer = document.getElementById('actionButtonsContainer');
+                const successStateContainer = document.getElementById('successStateContainer');
+                actionButtonsContainer.classList.remove('hidden');
+                successStateContainer.classList.add('hidden');
+                addButton.classList.remove('hidden');
+                saveButton.classList.add('hidden');
+                cancelButton.classList.add('hidden');
+                deregisterProductButton.classList.add('hidden');
+                formInputs.classList.remove('opacity-50');
+                formInputs.style.pointerEvents = 'auto';
+                filterAndRenderInventory();
+            }
+
+            function filterAndRenderInventory() {
+                const searchTerm = searchInput.value.toLowerCase();
+                const showDiscarded = showDiscardedCheckbox.checked;
+                const showSold = showSoldCheckbox.checked;
+                const showToBeDiscarded = showToBeDiscardedCheckbox.checked;
+
+                let itemsToRender;
+
+                if (showToBeDiscarded) {
+                    itemsToRender = inventory.filter(p => p.dispositionNote === 'Kassera' && !p.kasserad && !p.såld);
+                } else {
+                    itemsToRender = inventory.filter(p => 
+                        (showDiscarded || !p.kasserad) && 
+                        (showSold || !p.såld)
+                    );
+                }
+                
+                if (searchTerm) {
+                    itemsToRender = itemsToRender.filter(p => Object.values(p).some(val => String(val).toLowerCase().includes(searchTerm)));
+                }
+                
+                renderInventory(itemsToRender);
+            }
+
+            function setupInventoryListener() {
+                const q = collection(db, `/artifacts/${appId}/public/data/inventory`);
+                unsubscribeFromInventory = onSnapshot(q, (snapshot) => {
+                    inventory = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    inventory.sort((a, b) => new Date(b.date.split('-').reverse().join('-')) - new Date(a.date.split('-').reverse().join('-')));
+                    filterAndRenderInventory();
+                }, (error) => { console.error("Realtidsfel: ", error); showMessage('Kunde inte läsa lagerdata.', 'error'); });
+            }
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    isAuthReady = true;
+                    addButton.disabled = false;
+                    statusMessage.textContent = 'Ansluten.';
+                    if (!unsubscribeFromInventory) {
+                        setupInventoryListener();
+                    }
+                } else {
+                    isAuthReady = false;
+                    addButton.disabled = true;
+                    statusMessage.textContent = 'Ansluter...';
+                    if (unsubscribeFromInventory) {
+                        unsubscribeFromInventory();
+                        unsubscribeFromInventory = null;
+                    }
+                    inventory = [];
+                    filterAndRenderInventory();
+                    
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Autentiseringsfel: ", error);
+                        showMessage('Kunde inte ansluta till databasen.', 'error');
+                    }
+                }
+            });
+
+            // --- RAPPORT & AVREGISTRERINGSFUNKTIONER (KORRIGERAD) ---
+            function generateReport() {
+                const fromDateValue = reportDateFrom.value;
+                const toDateValue = reportDateTo.value;
+                const selectedWarehouse = reportWarehouseFilter.value;
+
+                let filteredItems = [...inventory]; // Start with a copy of the full inventory
+
+                // Filter by date
+                if (fromDateValue || toDateValue) {
+                    const fromDate = fromDateValue ? new Date(fromDateValue).getTime() : 0;
+                    const toDate = toDateValue ? new Date(toDateValue).setHours(23, 59, 59, 999) : Infinity;
+
+                    if (fromDateValue && toDateValue && fromDate > toDate) {
+                        showMessage('Startdatum kan inte vara efter slutdatum.', 'error');
+                        filteredItems = []; // Visa en tom lista om datum är ogiltiga
+                    } else {
+                        filteredItems = filteredItems.filter(item => {
+                            // Datum sparas som YYYY-MM-DD, vilket new Date() kan tolka direkt.
+                            const itemDate = new Date(item.date).getTime();
+                            return itemDate >= fromDate && itemDate <= toDate;
+                        });
+                    }
+                }
+                
+                // Filter by warehouse
+                if (selectedWarehouse) {
+                    filteredItems = filteredItems.filter(item => item.warehouse === selectedWarehouse);
+                }
+
+                renderReportList(filteredItems);
+            }
+
+            function renderReportList(items) {
+                reportList.innerHTML = '';
+                if (items.length === 0) {
+                    reportList.innerHTML = `<li class="p-3 text-center text-gray-300">Inga produkter hittades för valda filter.</li>`;
+                    printReportButton.disabled = true;
+                    printSalesButton.disabled = true;
+                    deregisterAllButton.classList.add('hidden');
+                    return;
+                }
+                
+                printReportButton.disabled = false;
+                
+                const hasSalesItems = items.some(item => item.dispositionNote === 'Sälj');
+                printSalesButton.disabled = !hasSalesItems;
+
+                const hasActiveItems = items.some(item => !item.kasserad && !item.såld);
+                if (hasActiveItems) {
+                    deregisterAllButton.classList.remove('hidden');
+                } else {
+                    deregisterAllButton.classList.add('hidden');
+                }
+
+                items.forEach(item => {
+                    const li = document.createElement('li');
+                    li.className = 'flex flex-col sm:flex-row items-center justify-between p-2 text-white border-t border-white/20';
+                    
+                    let statusText = 'Aktiv';
+                    let statusColor = 'text-green-300';
+                    if (item.såld) { statusText = 'Såld'; statusColor = 'text-yellow-300'; }
+                    if (item.kasserad) { statusText = 'Lämnat lagret'; statusColor = 'text-red-300'; }
+
+                    li.innerHTML = `
+                        <div class="flex-1 text-sm">
+                            <p class="font-bold">${item.name} <span class="text-gray-400 font-mono text-xs">#${item.id}</span></p>
+                            <p>Loggad: ${item.date} | Lager: ${item.warehouse || 'N/A'} | Hylla: ${item.shelfLocation || 'N/A'} | Status: <span class="font-semibold ${statusColor}">${statusText}</span></p>
+                            ${item.dispositionNote ? `<p class="text-yellow-300">Anm: ${item.dispositionNote}</p>` : ''}
+                        </div>
+                        <div class="mt-2 sm:mt-0 flex items-center gap-4">
+                            ${!item.kasserad && !item.såld ? `
+                            <div class="flex gap-2 text-xs">
+                                <label><input type="radio" name="action-${item.id}" value="sälj" class="mr-1">Sälj</label>
+                                <label><input type="radio" name="action-${item.id}" value="kasserad" class="mr-1" checked>Kassera</label>
+                            </div>
+                            ` : ''}
+                        </div>
+                    `;
+                    reportList.appendChild(li);
+                });
+            }
+            
+            async function executeDeregistration() {
+                statusMessage.textContent = 'Avregistrerar valda produkter...';
+                const batch = writeBatch(db);
+                let count = 0;
+
+                itemsToDeregister.forEach(itemData => {
+                    const itemRef = doc(db, `/artifacts/${appId}/public/data/inventory`, itemData.id);
+                    let updateData = {
+                        kasserad: true,
+                        såld: false,
+                        images: [],
+                        dispositionNote: itemData.action === 'sälj' ? 'Sälj' : 'Kassera'
+                    };
+                    batch.update(itemRef, updateData);
+                    count++;
+                });
+
+                try {
+                    await batch.commit();
+                    showMessage(`${count} produkter har avregistrerats och bilderna har raderats.`);
+                    generateReport();
+                } catch (error) {
+                    console.error("Fel vid batch-avregistrering:", error);
+                    showMessage('Kunde inte avregistrera produkterna.', 'error');
+                } finally {
+                    statusMessage.textContent = 'Ansluten.';
+                    itemsToDeregister = [];
+                    confirmationModal.classList.add('hidden');
+                    confirmButton.onclick = null;
+                }
+            }
+
+            function confirmDeregisterAll() {
+                itemsToDeregister = [];
+                const listItems = reportList.querySelectorAll('li');
+                listItems.forEach(li => {
+                    const id = li.querySelector('.font-mono')?.textContent.substring(1);
+                    if (id) {
+                        const product = inventory.find(p => p.id === id);
+                        if (product && !product.kasserad && !product.såld) {
+                            const selectedAction = li.querySelector(`input[name="action-${id}"]:checked`)?.value || 'kasserad';
+                            itemsToDeregister.push({ id: id, action: selectedAction });
+                        }
+                    }
+                });
+
+                if (itemsToDeregister.length === 0) {
+                    showMessage('Inga aktiva produkter i listan att avregistrera.', 'error');
+                    return;
+                }
+
+                confirmationText.textContent = `Är du säker på att du vill avregistrera ${itemsToDeregister.length} produkter i listan? Alla bilder kommer raderas permanent.`;
+                confirmButton.onclick = executeDeregistration;
+                confirmationModal.classList.remove('hidden');
+            }
+            
+            async function executeSingleDeregister(docId) {
+                statusMessage.textContent = 'Avregistrerar produkt...';
+                try {
+                    const itemRef = doc(db, `/artifacts/${appId}/public/data/inventory`, docId);
+                    await updateDoc(itemRef, {
+                        kasserad: true,
+                        såld: false,
+                        images: []
+                    });
+                    showMessage('Produkten har avregistrerats.');
+                } catch (error) {
+                    console.error("Fel vid avregistrering:", error);
+                    showMessage('Kunde inte avregistrera produkten.', 'error');
+                } finally {
+                    confirmationModal.classList.add('hidden');
+                    confirmButton.onclick = null; 
+                    resetFormAndRender();
+                    statusMessage.textContent = 'Ansluten.';
+                }
+            }
+
+            function printReport(onlySales = false) {
+                const from = reportDateFrom.value || 'start';
+                const to = reportDateTo.value || 'idag';
+                
+                const listItems = Array.from(reportList.querySelectorAll('li'));
+                let itemsToPrintHTML = '';
+
+                if (onlySales) {
+                    const salesItems = listItems.filter(li => {
+                        const id = li.querySelector('.font-mono')?.textContent.substring(1);
+                        const product = inventory.find(p => p.id === id);
+                        return product && product.dispositionNote === 'Sälj';
+                    });
+
+                    if (salesItems.length === 0) {
+                        showMessage('Inga produkter med anmärkning "Sälj" i den nuvarande listan.', 'error');
+                        return;
+                    }
+                    itemsToPrintHTML = salesItems.map(li => li.outerHTML).join('');
+                } else {
+                    itemsToPrintHTML = reportList.innerHTML;
+                }
+                
+                const printWindow = window.open('', '', 'height=800,width=600');
+                let content = `
+                    <html>
+                        <head>
+                            <title>${onlySales ? 'Säljrapport' : 'Lagerrapport'} ${from} - ${to}</title>
+                            <style>
+                                body { font-family: sans-serif; font-size: 9pt; }
+                                h1 { text-align: center; font-size: 14pt; }
+                                ul { list-style: none; padding: 0; }
+                                li { padding: 4px 0; border-bottom: 1px solid #ccc; }
+                                p { margin: 2px 0; }
+                                .font-bold { font-weight: bold; }
+                                .text-sm { font-size: 8pt; }
+                                .text-gray-400 { color: #999; }
+                                .text-yellow-300 { color: #b45309; }
+                                .text-red-300 { color: #b91c1c; }
+                                .text-green-300 { color: #047857; }
+                            </style>
+                        </head>
+                        <body>
+                            <h1>${onlySales ? 'Säljrapport' : 'Lagerrapport'} ${from} till ${to}</h1>
+                            <ul>${itemsToPrintHTML}</ul>
+                        </body>
+                    </html>`;
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = content;
+                tempDiv.querySelectorAll('button, select, input[type="radio"], label').forEach(el => el.remove());
+                
+                printWindow.document.write(tempDiv.innerHTML);
+                printWindow.document.close();
+                printWindow.focus();
+                printWindow.print();
+            }
+            
+            // --- EVENT LISTENERS ---
+            imageDropZone.addEventListener('click', () => imageFileInput.click());
+            openCameraButton.addEventListener('click', () => imageFileInput.click());
+            imageFileInput.addEventListener('change', (event) => handleFiles(event.target.files));
+            imageDropZone.addEventListener('dragover', (event) => { event.preventDefault(); imageDropZone.classList.add('bg-white/30', 'border-dashed'); });
+            imageDropZone.addEventListener('dragleave', () => { imageDropZone.classList.remove('bg-white/30', 'border-dashed'); });
+            imageDropZone.addEventListener('drop', (event) => { event.preventDefault(); imageDropZone.classList.remove('bg-white/30', 'border-dashed'); handleFiles(event.dataTransfer.files); });
+            addButton.addEventListener('click', addProduct);
+            saveButton.addEventListener('click', saveEdit);
+            cancelButton.addEventListener('click', resetFormAndRender);
+            logNewButton.addEventListener('click', resetFormAndRender);
+            printNewProductBarcodeButton.addEventListener('click', () => { if (lastSavedDocId) { window.showBarcode(lastSavedDocId, true); } });
+            searchInput.addEventListener('input', filterAndRenderInventory);
+            showDiscardedCheckbox.addEventListener('change', filterAndRenderInventory);
+            showSoldCheckbox.addEventListener('change', filterAndRenderInventory);
+            showToBeDiscardedCheckbox.addEventListener('change', filterAndRenderInventory);
+            
+            deregisterProductButton.addEventListener('click', () => {
+                if (!editingDocId) return;
+                const product = inventory.find(p => p.id === editingDocId);
+                if (!product) return;
+                confirmationText.textContent = `Är du säker på att du vill markera "${product.name}" som 'Lämnat lagret'? Produkten avregistreras och alla bilder raderas permanent.`;
+                confirmButton.onclick = () => executeSingleDeregister(editingDocId);
+                confirmationModal.classList.remove('hidden');
+            });
+
+            generateReportButton.addEventListener('click', generateReport);
+            printReportButton.addEventListener('click', () => printReport(false));
+            printSalesButton.addEventListener('click', () => printReport(true));
+            deregisterAllButton.addEventListener('click', confirmDeregisterAll);
+            
+            cancelConfirmButton.addEventListener('click', () => {
+                confirmationModal.classList.add('hidden');
+                confirmButton.onclick = null; 
+            });
+
+        });
+    </script>
+    <style>
+        input[type="date"]::-webkit-calendar-picker-indicator, select { filter: invert(1); }
+        select option { color: black; }
+    </style>
+</head>
+<body class="bg-[#00509E] flex items-center justify-center min-h-screen p-2 sm:p-4">
+
+    <div id="loginScreen" class="w-full max-w-sm mx-auto text-center">
+        <div class="bg-white/10 p-8 rounded-2xl shadow-xl">
+            <h1 class="text-3xl font-bold text-white mb-6">KIPP - PostNord</h1>
+            <input type="text" id="nameLoginInput" placeholder="Ange ditt namn" class="w-full p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 placeholder-gray-300 text-white text-center">
+            <input type="password" id="passwordLoginInput" placeholder="Ange lösenord" class="w-full mt-2 p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 placeholder-gray-300 text-white text-center">
+            <p id="loginError" class="text-red-400 text-sm mt-2 hidden">Felaktigt namn eller lösenord.</p>
+            <button id="loginButton" class="w-full mt-4 bg-white text-[#00509E] font-bold p-3 rounded-xl shadow-lg hover:bg-gray-200 transition-colors transform hover:scale-105">Logga in</button>
+        </div>
+    </div>
+
+    <div id="mainApp" class="hidden">
+        <div class="bg-[#00509E] p-4 sm:p-6 md:p-8 rounded-2xl shadow-xl w-full max-w-4xl text-white">
+            <h1 class="text-2xl sm:text-3xl font-bold text-center mb-1">KIPP - PostNord</h1>
+            <p id="loggedInUser" class="text-center text-sm text-gray-300 mb-2"></p>
+            <div class="mb-4 text-center"><p id="statusMessage" class="text-sm text-gray-300 italic mt-1">Ansluter...</p></div>
+
+            <div id="addProductForm" class="mb-6 bg-white/10 p-4 rounded-xl shadow-inner">
+                <h2 class="text-xl font-semibold mb-4">Logga ny produkt</h2>
+                <div id="formInputs" class="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+                    <input type="text" id="nameInput" placeholder="Produktnamn*" class="p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 placeholder-gray-300">
+                    <select id="dispositionInput" class="p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 text-white appearance-none">
+                        <option value="" class="text-gray-500">Välj anmärkning*</option>
+                        <option value="Sälj" class="text-black">Sälj</option>
+                        <option value="Kassera" class="text-black">Kassera</option>
+                    </select>
+                    <select id="warehouseInput" class="sm:col-span-2 p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 text-white appearance-none">
+                        <option value="" class="text-gray-500">Välj lager*</option>
+                        <option value="Skador och adresslöst, Jönköping" class="text-black">Skador och adresslöst, Jönköping</option>
+                        <option value="Toftanäs" class="text-black">Toftanäs</option>
+                        <option value="Växjö" class="text-black">Växjö</option>
+                        <option value="Härryda" class="text-black">Härryda</option>
+                        <option value="Örebro" class="text-black">Örebro</option>
+                        <option value="Segeltorp" class="text-black">Segeltorp</option>
+                        <option value="Veddestad" class="text-black">Veddestad</option>
+                        <option value="SGT Norrköping" class="text-black">SGT Norrköping</option>
+                        <option value="SGT Göteborg" class="text-black">SGT Göteborg</option>
+                        <option value="SGT Malmö" class="text-black">SGT Malmö</option>
+                        <option value="SGT Växjö" class="text-black">SGT Växjö</option>
+                        <option value="SGT Örebro" class="text-black">SGT Örebro</option>
+                        <option value="SGT Sundsvall" class="text-black">SGT Sundsvall</option>
+                    </select>
+                    <div class="sm:col-span-2 relative">
+                        <textarea id="descInput" placeholder="Beskrivning (klicka på 🎤 för röstinmatning)" rows="2" class="w-full p-3 pr-12 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all resize-none placeholder-gray-300"></textarea>
+                        <button type="button" id="voiceInputButton" class="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/20 hover:bg-white/40 flex items-center justify-center text-white transition-colors hidden"><span>🎤</span></button>
+                    </div>
+                    <input type="text" id="weightInput" placeholder="Vikt (t.ex. 2.5 kg)" class="p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 placeholder-gray-300">
+                    <input type="text" id="shelfInput" placeholder="Hyllplats" class="p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white transition-all h-14 placeholder-gray-300">
+                    <div class="sm:col-span-2">
+                        <div class="flex flex-col sm:flex-row gap-3">
+                            <div id="imageDropZone" class="flex-grow p-3 bg-white/20 border-2 border-transparent rounded-xl flex flex-col items-center justify-center gap-1 hover:bg-white/30 transition-all h-28 cursor-pointer">
+                                <input type="file" id="imageFileInput" accept="image/*" multiple class="hidden" capture="environment">
+                                <div id="imagePlaceholder" class="text-center pointer-events-none">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mx-auto mb-1"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                                    <p class="font-semibold">Lägg till filer</p>
+                                    <p class="text-xs text-gray-300">eller dra och släpp</p>
+                                </div>
+                            </div>
+                            <button type="button" id="openCameraButton" class="flex-shrink-0 sm:w-28 p-3 bg-white/20 border-2 border-transparent rounded-xl flex flex-col items-center justify-center gap-1 hover:bg-white/30 transition-all h-28">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-camera mx-auto mb-1"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                                <p class="font-semibold">Öppna kamera</p>
+                            </button>
+                        </div>
+                        <div id="imageThumbnailContainer" class="mt-2 flex flex-wrap gap-2"></div>
+                    </div>
+                </div>
+                <div id="formFooter">
+                    <div id="actionButtonsContainer" class="flex flex-col sm:flex-row gap-2 mt-4">
+                        <button type="button" id="addButton" class="flex-1 bg-white text-[#00509E] font-bold p-3 rounded-xl shadow-lg hover:bg-gray-200 transition-colors transform hover:scale-105" disabled>Lägg till produkt</button>
+                        <button type="button" id="saveButton" class="flex-1 hidden bg-green-500 text-white font-bold p-3 rounded-xl shadow-lg hover:bg-green-600 transition-colors transform hover:scale-105">Spara ändringar</button>
+                        <button type="button" id="deregisterProductButton" class="flex-1 hidden bg-red-600 text-white font-bold p-3 rounded-xl shadow-lg hover:bg-red-700 transition-colors">Lämnat Lagret</button>
+                        <button type="button" id="cancelButton" class="flex-1 hidden bg-gray-400 text-white p-3 rounded-xl shadow-lg hover:bg-gray-500 transition-colors transform hover:scale-105">Avbryt</button>
+                    </div>
+                    <div id="successStateContainer" class="hidden mt-4 text-center bg-green-500/20 p-4 rounded-xl border border-green-400">
+                        <h3 class="font-bold text-lg text-white">Produkt sparad!</h3>
+                        <p id="successProductName" class="mb-4 text-gray-200"></p>
+                        <div class="flex flex-col sm:flex-row gap-2 justify-center">
+                            <button type="button" id="printNewProductBarcodeButton" class="flex-1 bg-sky-500 text-white p-3 rounded-xl shadow-lg hover:bg-sky-600 transition-colors">Skriv ut etikett</button>
+                            <button type="button" id="logNewButton" class="flex-1 bg-white text-[#00509E] font-bold p-3 rounded-xl shadow-lg hover:bg-gray-200 transition-colors">Logga en till</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="messageBox" class="mt-4 p-3 text-sm rounded-xl hidden"></div>
+            </div>
+
+            <div class="mb-6">
+                <h2 class="text-xl font-semibold mb-4">Aktuellt lager</h2>
+                <div class="bg-white/10 p-4 rounded-xl shadow-inner">
+                    <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                        <input type="text" id="searchInput" placeholder="Sök i lagret..." class="flex-grow p-3 bg-white/20 border-2 border-white/30 rounded-xl focus:outline-none focus:ring-2 focus:ring-white placeholder-gray-300">
+                    </div>
+                    <div class="flex flex-col sm:flex-row sm:space-x-4 space-y-2 sm:space-y-0 mb-4">
+                        <div class="flex items-center"><input type="checkbox" id="showDiscardedCheckbox" class="h-4 w-4 rounded bg-white/30 border-white/50"><label for="showDiscardedCheckbox" class="ml-2 text-sm">Visa "Lämnat lagret"</label></div>
+                        <div class="flex items-center"><input type="checkbox" id="showToBeDiscardedCheckbox" class="h-4 w-4 rounded bg-white/30 border-white/50"><label for="showToBeDiscardedCheckbox" class="ml-2 text-sm">Visa Kasserat</label></div>
+                        <div class="flex items-center"><input type="checkbox" id="showSoldCheckbox" class="h-4 w-4 rounded bg-white/30 border-white/50"><label for="showSoldCheckbox" class="ml-2 text-sm">Visa sålda</label></div>
+                    </div>
+                    <ul id="inventoryList" class="divide-y divide-white/20"></ul>
+                </div>
+            </div>
+
+            <div class="mb-6">
+                <h2 class="text-xl font-semibold mb-4">Rapporter & Avregistrering</h2>
+                <div class="bg-white/10 p-4 rounded-xl shadow-inner">
+                    <div class="grid grid-cols-1 md:grid-cols-3 items-end gap-4 mb-4">
+                        <div class="w-full"><label for="reportDateFrom" class="text-sm">Från datum:</label><input type="date" id="reportDateFrom" class="w-full p-3 bg-white/20 border-2 border-white/30 rounded-xl"></div>
+                        <div class="w-full"><label for="reportDateTo" class="text-sm">Till datum:</label><input type="date" id="reportDateTo" class="w-full p-3 bg-white/20 border-2 border-white/30 rounded-xl"></div>
+                        <div class="w-full"><label for="reportWarehouseFilter" class="text-sm">Lager:</label>
+                            <select id="reportWarehouseFilter" class="w-full p-3 bg-white/20 border-2 border-white/30 rounded-xl h-12 text-white appearance-none">
+                                <option value="" class="text-black">Alla lager</option>
+                                <option value="Skador och adresslöst, Jönköping" class="text-black">Skador och adresslöst, Jönköping</option>
+                                <option value="Toftanäs" class="text-black">Toftanäs</option>
+                                <option value="Växjö" class="text-black">Växjö</option>
+                                <option value="Härryda" class="text-black">Härryda</option>
+                                <option value="Örebro" class="text-black">Örebro</option>
+                                <option value="Segeltorp" class="text-black">Segeltorp</option>
+                                <option value="Veddestad" class="text-black">Veddestad</option>
+                                <option value="SGT Norrköping" class="text-black">SGT Norrköping</option>
+                                <option value="SGT Göteborg" class="text-black">SGT Göteborg</option>
+                                <option value="SGT Malmö" class="text-black">SGT Malmö</option>
+                                <option value="SGT Växjö" class="text-black">SGT Växjö</option>
+                                <option value="SGT Örebro" class="text-black">SGT Örebro</option>
+                                <option value="SGT Sundsvall" class="text-black">SGT Sundsvall</option>
+                            </select>
+                        </div>
+                        <button id="generateReportButton" class="md:col-span-3 w-full bg-white text-[#00509E] font-bold p-3 rounded-xl shadow-lg hover:bg-gray-200 transition-colors h-12">Generera lista</button>
+                    </div>
+                    <ul id="reportList" class="divide-y divide-white/20"></ul>
+                    <div class="flex flex-col sm:flex-row gap-4 mt-4">
+                        <button id="printReportButton" class="flex-1 bg-gray-300 text-gray-800 font-bold p-3 rounded-xl shadow-lg hover:bg-gray-400 transition-colors" disabled>Skriv ut Hela Listan</button>
+                        <button id="printSalesButton" class="flex-1 bg-green-500 text-white font-bold p-3 rounded-xl shadow-lg hover:bg-green-600 transition-colors" disabled>Skriv ut Säljlista</button>
+                        <button id="deregisterAllButton" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold p-3 rounded-xl shadow-lg transition-colors hidden">Avregistrera Valda</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal för streckkod -->
+    <div id="barcodeModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-2xl p-6 shadow-xl w-full max-w-xs text-center text-black">
+            <div id="barcodePrintContent">
+                <h3 class="text-lg font-bold mb-2">Produkt-ID</h3><canvas id="barcodeCanvas" class="mx-auto"></canvas><div id="barcodeProductInfo" class="mt-4"></div>
+            </div>
+            <div class="flex justify-center gap-2 mt-6">
+                <button id="barcodeCloseButton" type="button" class="bg-gray-400 text-white px-4 py-2 rounded-xl hover:bg-gray-500">Stäng</button>
+                <button id="barcodePrintButton" type="button" class="bg-[#00509E] text-white px-4 py-2 rounded-xl hover:bg-[#003c75]">Skriv ut</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modal för produktdetaljer -->
+    <div id="detailModal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
+        <div class="bg-white text-black rounded-2xl p-6 shadow-xl w-full max-w-lg text-center relative">
+             <button id="closeDetailModalButton" class="absolute top-2 right-2 text-gray-400 hover:text-gray-600"><svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            <img id="detailMainImage" src="" alt="Produktbild" class="w-full h-64 object-contain rounded-lg mb-4 bg-gray-100">
+            <div id="detailThumbnailContainer" class="flex flex-wrap justify-center gap-2 mb-4"></div>
+            <div id="detailInfo"></div>
+        </div>
+    </div>
+
+    <!-- Modal för streckkodsskanner -->
+    <div id="scannerModal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex flex-col items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-2xl p-6 shadow-xl w-full max-w-md text-center">
+            <div id="qr-reader" style="width: 100%;"></div>
+            <p id="scanner-instructions" class="mt-4 p-2 rounded-lg font-semibold text-black"></p>
+            <button id="closeScannerButton" class="mt-4 bg-red-500 text-white px-6 py-2 rounded-xl hover:bg-red-600">Avbryt</button>
+        </div>
+    </div>
+
+    <!-- Modal för bekräftelse -->
+    <div id="confirmationModal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
+        <div class="bg-white text-black rounded-2xl p-6 shadow-xl w-full max-w-md text-center">
+            <h3 class="text-lg font-bold mb-4">Bekräfta åtgärd</h3>
+            <p id="confirmationText" class="mb-6"></p>
+            <div class="flex justify-center gap-4">
+                <button id="cancelConfirmButton" class="bg-gray-300 text-gray-800 font-bold py-2 px-6 rounded-xl hover:bg-gray-400">Avbryt</button>
+                <button id="confirmButton" class="bg-red-600 text-white font-bold py-2 px-6 rounded-xl hover:bg-red-700">Bekräfta</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
